@@ -24,17 +24,17 @@ Encompass, NonStop SQL, DB2, VLM, OLM和IMS FF在正常回滚时都会写CLR。�
 VLM在重启回滚时不会写CLR。结果，在回滚事务的时候就只会写有限的日志，即使在重启时系统再次崩溃。实际上，只有在正常回滚时才会写CLR。当然，这对介质恢复会有负面影响。OLM在重启时会对undo和redo都会写CLR（分别称之为undomodify和redomodify记录）以应对重启时的故障。如果重启流程被打断的话，OLM可能对于同一条更新记录写多条undomodify和redomodify记录。CLR不会给自己生成CLR。在重启恢复时，Encompass 和 DB2会undo CLR的变更，从而会写CLR的CLR，并且在正常流程或重启恢复时会多次写这些CLR。最坏的情况是，如果不断的重启失败，日志记录数会呈指数级增长。图5展示了ARIES是如何规避此问题的。IMS在undo遍历的时候忽略了CLR，这样就不会对它们写CLR了。继而导致的结果是：因为多次崩溃，和其他的一样，IMS可能会对同一条记录结束写相同的CLR。更糟的是，IMS和OLM写的日志记录数呈线性增长。因为它的强制策略，IMS只有在介质恢复的时候才会redo CLR的变更。  
 
 **日志记录内容**  
-IMS FP只会写redo信息（比如，完整数据镜像），因为它使用的是no-steal策略。正如之前提到的，IMS使用值（或者状态）日志和物理（比如字节尺度的）锁（参见【76】）。IMS FF日志包含undo信息和redo信息。由于IMS不会undo  CLR的更新，只有redo信息中需要CLR。为了支持XRF热备份，IMS在其日志记录中包含了足够的信息来备份系统，并跟踪所更新对象的锁信息。IMS FP 同样记录被修改页所占的缓存地址。在备份恢复或重启恢复时，可以使用此信息来减少redo DEDB的更新的工作量。Encompass 和 VLM同样记录变更记录的完整undo,redo信息。DB2和NonStop SQL log只记录变更字段前后的镜像数据。OLM记录更新的操作。Encompass和DB2的CLR需要包含redo和undo信息，因为它们的CLR可能会被undo。OLM会周期性的记录每个对象的一致性快照。OLM的undomodify和redomodify记录，没有redo或undo信息，只包含了被修改记录的LSN。但是OLM的modify , redomodify , undomodify 也包含了一个对页的映射，这可以标识出修改的对象处于哪些页上。  
+IMS FP只会写redo信息（比如，记录后镜像），因为它使用的是no-steal策略。正如之前提到的，IMS使用值（或者状态）日志和物理（比如字节尺度的）锁（参见【76】）。IMS FF日志包含undo信息和redo信息。由于IMS不会undo  CLR的更新，只有redo信息中需要CLR。为了支持XRF热备份，IMS在其日志记录中包含了足够的信息来备份系统，并跟踪所更新对象的锁信息。IMS FP 同样记录被修改页所占的缓存地址。在备份恢复或重启恢复时，可以使用此信息来减少redo DEDB的更新的工作量。Encompass 和 VLM同样记录变更记录的完整undo,redo信息。DB2和NonStop SQL log只记录字段变更前后的镜像数据。OLM记录更新的操作。Encompass和DB2的CLR需要包含redo和undo信息，因为它们的CLR可能会被undo。OLM会周期性的记录每个对象的一致性快照。OLM的undomodify和redomodify记录，没有redo或undo信息，只包含了被修改记录的LSN。但是OLM的modify , redomodify , undomodify 也包含了一个对页的映射，这可以标识出修改的对象处于哪些页上。  
 
 **Page overhead**  
-Encompass 和 NonStop SQL使用页LSN来跟踪每个页的状态。VLM使用多LSN，但OLM使用单LSN。DB2使用单LSN，IMS FF不使用LSN。IMS FF不使用LSN，VLM想知道页状态也没问题的，因为IMS和VLM的值日志和物理锁属性。redo一个已生效的更新或者undo一个不存在的更新是可以接受的。IMS FP使用DEDB中的一个字段来记录版本号，这样就能在系统崩溃后能正确处理redo【67】。当DB2将一个索引页分割成迷你页时，它会在每个迷你页上加上LSN，除此以外整个页上还有一个LSN。  
+Encompass 和 NonStop SQL使用页LSN来跟踪每个页的状态。VLM不使用LSN，但OLM使用单LSN。DB2使用单LSN，IMS FF不使用LSN。IMS FF不使用LSN，VLM想知道页状态也没问题的，因为IMS和VLM的值日志和物理锁属性。redo一个已生效的更新或者undo一个不存在的更新是可以接受的。IMS FP使用DEDB中的一个字段来记录版本号，这样就能在系统崩溃后能正确处理redo【67】。当DB2将一个索引页分割成迷你页时，它会在每个迷你页上加上LSN，除此以外整个页上还有一个LSN。  
 
-**Log passes during restart recovery重启恢复时的日志遍历**  
-Encompass和NonStop SQL进行两次遍历（redo然后undo）,DB2进行3次遍历（分析，redo，然后undo，参见第6节）。Encompass和NonStop SQL从倒数第二个成功的checkpoint开始redo遍历。这就足够了，因为缓存组件会要求两个检测点之间的脏页都会刷到磁盘上。在执行undo遍历之前，它们似乎也会重演历史。如果主系统崩溃了，然后启动备份系统的话，就不会进行历史重演【4】。在被热备份接管时，首先获取对失效事务的更新锁。然后回滚这些失效事务，同时还可以开启新事务。每个失效事务使用一个单独进程来回滚，从而获取并行性。DB2的redo扫描的其实点，取决于最近一次checkpoint中包含的信息，这会有分析遍历来修改。正如之前所提到的，DB2使用选择redo（参见10.1小节）  
+**重启恢复时的日志遍历**  
+Encompass和NonStop SQL进行两次遍历（redo然后undo）,DB2进行3次遍历（分析，redo，然后undo，参见第6节）。Encompass和NonStop SQL从倒数第二个成功的checkpoint开始redo遍历；这就足够了，因为缓存组件会要求两个检测点之间的脏页都会刷到磁盘上。在执行undo遍历之前，它们似乎也会重演历史。如果主系统崩溃了，然后启动备份系统的话，就不会进行历史重演【4】。在被热备份接管时，首先重新获取对失效事务的更新锁；然后回滚这些失效事务，同时还可以开启新事务。每个失效事务使用一个单独进程来回滚，从而获取并行性。DB2的redo扫描的起始点，取决于最近一次成功的checkpoint中包含的信息，会被分析遍历来修改。正如之前所提到的，DB2选择使用redo（参见10.1小节）  
 
-VLM进行向后遍历，OLM执行3次遍历（分析，undo，redo）。在OLMS和VLM的遍历过程中会维护很多列表。OLM的undomodify和redomodify日志记录只是用来修改这些列表，这和其他系统输出的CLR不同。在VLM中，使用向后遍历来undo那些没有提及的变更，并且redo已提交的变更。在执行这些操作时不会写日志。在OLM进行undo遍历是，对于恢复的每个对象，如果某个对象的操作一致性版本不在持久化存储上，那么它就会从快照日志中读取该对象的快照，然后从这个对象开始：（1）在剩余的redo遍历中，任何对这个快照记录之前的更新都可以进行逻辑undo。（2），在redo遍历时，对于此快照对象的已提交的或in-doubt态的更新都可以逻辑redo.这和【16,78】中使用单独日志的影子技术类似--不同的在于对象级别的checkpoint代替数据库层面的checkpoint，并且只用一个日志而不是两个。  
+VLM进行向后遍历，OLM执行3次遍历（分析，undo，redo）。在OLMS和VLM的遍历过程中会维护很多列表；OLM的undomodify和redomodify日志记录只是用来修改这些列表，这和其他系统输出的CLR作用不同。在VLM中，向后遍历用来undo那些没有提交的变更，并且redo已提交的变更；在执行这些操作时不会写日志。在OLM进行undo遍历时，对于每个恢复的对象，如果其操作的一致性版本不在持久化存储上，那么它就会从快照日志中读取该对象的快照，然后从这个对象一致性版本开始：（1）在redo遍历的剩余部分中，任何相对快照记录之前的可以undo的更新都可以进行逻辑undo。（2），在redo遍历时，相对快照之后的已提交的或in-doubt态的更新都可以逻辑redo.这和【16,78】中使用单独日志的影子技术类似--不同的在于对象级别的checkpoint代替数据库层面的checkpoint，并且只用一个日志而不是两个。  
 
-IMS首先重新加载MSDB，使用崩溃前最近一次成功的checkpoind收到的内容。包含在checkpoint中的脏DEDB缓存也会被加载到相同的缓存中。也就是说，在崩溃后重启时缓存数不可以再改变了。接着，它只做对日志做一次向前遍历（参见第6节）。在这次遍历过程中，它将日志在内存中按事务分开然后，如果需要的话，redo那些完整的事务的FP更新。可以使用多进程来redo这个DEDB更新。考虑到FP，只关心从最后一个checkpoint开始的更新。在遍历结束是，会undo那些in-progress事务的FF更新。（使用内存中日志记录），一个事务一个进程并行处理。如果某个事务的日志记录因为空间不够没法记录在内存中，就会发起一次向后扫描来获取该事务回滚所需的日志记录。在XRF环境中，如果一个热备份IMS接管了，对于失效事务的处理和Tandem类似。也就是说，在回滚的同时新的事务也可以执行。  
+IMS首先从文件重新加载MSDB，文件的内容为崩溃前最近一次成功的checkpoind。包含在checkpoint中的脏DEDB缓存也会被加载到相同的缓存中。也就是说，在崩溃后重启时缓存数不可以再改变了。接着，它只做对日志做一次向前遍历（参见第6节）。在这次遍历过程中，它将在内存中累积一个事务的起始和redos日志，如果需要的话，使用事务的全部的FP更新。可以使用多进程来redo这个DEDB更新增加并发。考虑到FP，只关心从最后一个checkpoint开始的更新。在遍历结束时，会undo那些in-progress事务的FF更新。（使用内存中日志记录），一个事务一个进程并行处理。如果某个事务的日志记录因为空间不够没法记录在内存中，就会发起一次向后扫描来获取该事务回滚所需的日志记录。在XRF环境中，如果接管了一个热备份IMS，对于失效事务的处理和Tandem类似。也就是说，在回滚的同时新的事务也可以执行。  
 
 **Page forces during restart.**  
 OLM，VLM，DB2在重启结束时会强制刷出所有脏页。Encompass 和 NonStop SQL就不得知了。  
@@ -42,7 +42,7 @@ OLM，VLM，DB2在重启结束时会强制刷出所有脏页。Encompass 和 Non
 **Restart checkpoints**  
 IMS, DB2, OLM 和 VLM只有在重启恢复结束时才会执行checkpoint.Encompass 和 NonStop SQL就不得知了。   
 
-**Restrictions on data.数据限制**  
-Encompass 和 NonStop SQL 的每条记录必须要有唯一key。该唯一key使用来确保如果想undo一个日志操作，该操作并没有在持久化存储执行过，那么undo就会失败了。也就是说，使用唯一key可以保证操作的幂等性。IMS使用字节尺度的锁和日志，因此不允许记录在页内随意移动。这就导致了碎片化，空间利用率较低。IMS对FP数据强加了一些限制。VLM要求数据分隔成固定整数长度（小于一页的大小）。这些限制所导致的结果和IMS的类似。  
+**数据限制**  
+Encompass 和 NonStop SQL 的每条记录必须要有唯一key。该唯一key使用来确保如果想undo一个日志操作，该操作并没有应用到持久化存储中的版本，那么undo就会失败了。也就是说，使用唯一key可以保证操作的幂等性。IMS使用字节尺度的锁和日志，因此不允许记录在页内随意移动。这就导致了碎片化，空间利用率较低。IMS对FP数据强加了一些限制。VLM要求数据分隔成固定整数长度（小于一页的大小），不可重定位数据团。这些限制所导致的结果和IMS的类似。  
 
 【2,26,56】没有讨论系统崩溃后的恢复，【33】的原理论述也没有包含富语义的锁模型（比如，操作日志）。在本文的其他章节，我们已经指出使用一些其他方法（由那边论文中提出的）的问题。  
